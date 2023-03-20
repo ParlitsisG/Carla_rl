@@ -13,6 +13,22 @@ from keras.models import Sequential
 from keras.layers import Dense, Dropout , Conv2D, MaxPooling2D ,Activation,Flatten
 from keras.callbacks import TensorBoard
 from keras.optimizers import Adam
+import gym
+import numpy as np
+from enum import Enum
+import random
+import ray
+import tensorflow as tf
+from typing import List
+from gym import spaces
+from ray.rllib.algorithms.dqn.distributional_q_tf_model import DistributionalQTFModel
+from ray.rllib.algorithms.apex_dqn import ApexDQN
+from ray.rllib.models import ModelCatalog
+from ray.rllib.utils.typing import ModelConfigDict, TensorType, AlgorithmConfigDict, EnvCreator
+#from environments.knapsack import KnapsackEnv
+from ray.rllib.algorithms.dqn.dqn_tf_policy import DQNTFPolicy
+from ray.rllib.models.tf.tf_action_dist import get_categorical_class_with_temperature
+from ray.rllib.utils.tf_utils import reduce_mean_ignore_inf
 
 from tqdm import tqdm
 import tensorflow as tf
@@ -38,7 +54,7 @@ except IndexError:
 
 import carla
 from agents.navigation.local_planner import LocalPlanner
-SECONDS_PER_EPISODE=15.0
+SECONDS_PER_EPISODE=4.0
 Replay_MEMORY_SIZE =  5000
 MIN_REPLAY_MEMORY_SIZE=1000
 MINI_BATCH_SIZE=16
@@ -58,8 +74,16 @@ SHOW_METRICS=True
 MODEL_NAME="dqn"
 AGGREGATE_STATS_EVERY = 10
 
+class ActionType(Enum):
+    ACCELERATE = 0
+    SLOW_DOWN = 1
+    BREAK = 2
+    LEAVE_BREAK = 3
+    TURN_LEFT = 4
+    TURN_RIGHT = 5
 
-class CarEnv:
+
+class CarEnv(gym.Env):
     Show_metrics= SHOW_METRICS
     front_camera = None
     radar =None
@@ -69,18 +93,24 @@ class CarEnv:
         self.world = self.client.get_world()
         self.blueprint_library = self.world.get_blueprint_library()
         self.bp = self.blueprint_library.filter("model3")[0]
+        self.accelaration= 0
+        self.brake= 0
+        self.previous_accelaration=0
+        self.previous_brake=0
+
         
 
 
     def reset(self):
-        self.collision_hist=[]
 
-      
+        self.destroy_all_actors()
+
+        self.collision_hist=[]
         self.spawn_point = random.choice(self.world.get_map().get_spawn_points())
         self.vehicle = self.world.spawn_actor(self.bp, self.spawn_point)
         actor_list.append(self.vehicle)
 
-        self.spawn_npc(0,0,self.spawn_point.location)
+        self.spawn_npc(10,10,self.spawn_point.location)
 
         self.cam_bp = self.blueprint_library.find("sensor.camera.rgb")
         self.cam_bp.set_attribute("image_size_x", f"{IM_WIDTH}")
@@ -187,38 +217,81 @@ class CarEnv:
             if npc2 is None:
                 print(f"Failed to spawn walker {i + 1} after {max_attempts} attempts")
                 continue
-            self.move_walker(npc2)
+            #self.move_walker(npc2)
             print(f"Created walker {i + 1}")
             actor_list.append(npc2)
         
 
     def step(self, function):
-        if(function==0):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.1 , brake=0.0))
-        elif (function == 1):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.5, brake=0.0))
-        elif (function == 2):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.8, brake=0.0))
-        elif (function == 2):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.1, brake=0.0))
-        elif (function == 2):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.8, brake=0.0))
-        elif (function == 2):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.2, brake=0.0))
-        elif (function == 3):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
-        elif (function == 4):
-            self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+        if(function==0):                                                                                           # ultra slow accelaration (for example stop sign going in a blind turn without priority) #possibly not needed
+            self.accelaration+= 0.1
+            self.brake=0
+        elif (function == 1):                                                                                      #slightly accelarate 
+            self.accelaration+= 0.2
+            self.brake=0
+        elif (function == 2):                                                                                      # accelarate medium
+            self.accelaration+= 0.4
+            self.brake=0
+        elif (function == 3):                                                                                      # accelarate heavily
+            self.accelaration+= 0.6
+            self.brake=0
+        elif (function == 4):                                                                                       #slighty increase break
+            self.accelaration+= 0.0
+            self.brake+=0.1
+        elif (function == 5):                                                                                       #  increase break medium
+            self.accelaration=0.0
+            self.brake+= 0.3
+        elif (function == 6):                                                                                       # heavily increase break
+            self.accelaration= 0.0
+            self.brake+=0.5
+        elif (function == 7):                                                                                       #  full break 
+            self.accelaration= 0.0
+            self.brake=1.0
+        elif (function == 8):                                                                                       # dont press any pedals
+            self.accelaration= 0.0
+            self.brake=0.0
+        elif (function == 9):                                                                                      #slightly deccelarate 
+            self.accelaration-= 0.2
+            self.brake=0
+        elif (function == 10):                                                                                      # deccelarate medium
+            self.accelaration-= 0.4
+            self.brake=0
+        elif (function == 11):                                                                                      # deccelarate heavily
+            self.accelaration-= 0.6
+            self.brake=0
+        elif (function == 12):                                                                                       #slighty decrease break
+            self.accelaration= 0.0
+            self.brake-=0.1
+        elif (function == 13):                                                                                       #  increase break medium
+            self.accelaration=0.0
+            self.brake-= 0.3
+        elif (function == 14):                                                                                       # heavily increase break
+            self.accelaration= 0.0
+            self.brake-=0.5
+        
+        self.brake= max(0.0,self.brake)
+        self.brake= min(1.0,self.brake)
+        self.accelaration=max(0.0,self.accelaration)
+        self.accelaration=min(1.0,self.accelaration)
+        self.vehicle.apply_control(carla.VehicleControl(throttle=self.accelaration , brake=self.brake))
 
         velocity= self.vehicle.get_velocity()
         done= False
+        reward=0
         kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
         if (len(self.collision_hist) != 0):
             done =True
             reward = -200
-        elif kmh <30:  # will change into above speed limit and
+        elif kmh <10:  
             done =False
-            reward= -1
+            reward== -1
+        elif self.previous_brake==0 and self.brake==1.0:
+            reward+= -20
+        elif (self.brake - self.previous_brake)>=0.5:
+            reward= -10
+        elif(self.accelaration-self.previous_accelaration)>=0.5:
+            reward= -10
+        # detect obstacle upfront to check if safety distance exists penalize if not |||| this will be added
         else:
             done = False
             reward=1
@@ -227,18 +300,27 @@ class CarEnv:
             done=True
         return self.front_camera ,reward, done
 
-def destroy_all_actors():
-    global actor_list
-    print(" initialize destroy")
-    for actor in actor_list:
-        if actor is not None:
-            actor.destroy()
-    print("destroyed")
-    actor_list = []
+
+    def destroy_all_actors(self):
+        global actor_list
+        print("initialize destroy")
+        for actor in reversed(actor_list):
+            if actor is not None:
+                try:
+                    if 'vehicle' in actor.type_id:
+                        actor.set_autopilot(enabled=False)
+                    print(f"Destroying actor: {actor.id}")
+                    actor.destroy()
+                    print(f"Destroying actor: {actor.id}")
+                except Exception as e:
+                    print(f"Error while destroying actor: {actor.id}, {e}")
+        print("destroyed")
+        actor_list = []
+
 
 if __name__ == '__main__':
     env = CarEnv()
-    num_episodes = 10
+    num_episodes = 3
     for episode in range(num_episodes):
         print(f"Episode: {episode + 1}")  # Debug: Print the current episode
         env.reset()
@@ -249,6 +331,5 @@ if __name__ == '__main__':
             _, reward, done = env.step(action)
             step_count += 1
             print(f"Step: {step_count}, Reward: {reward}, Done: {done}")
-            time.sleep(0.1)
-        destroy_all_actors()
+        env.destroy_all_actors()
 
