@@ -74,6 +74,7 @@ SHOW_METRICS=True
 MODEL_NAME="dqn"
 AGGREGATE_STATS_EVERY = 10
 
+
        
 
 class ActionType(Enum):
@@ -111,6 +112,9 @@ class CarEnv(gym.Env):
         self.previous_accelaration=0
         self.previous_brake=0
         self.ai_walker_list=[]
+        self.front_depth_camera= None
+        self.radar= None
+        self.front_segmentation_camera= None 
 
         
 
@@ -154,13 +158,27 @@ class CarEnv(gym.Env):
         # Get the blueprint for the radar sensor
         self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar')
         # Set the attributes for the radar sensor
-        self.radar_bp.set_attribute('horizontal_fov', '40')
+        self.radar_bp.set_attribute('horizontal_fov', '30')
         self.radar_bp.set_attribute('vertical_fov', '30')
-        self.radar_bp.set_attribute('points_per_second', str(2000))
+        self.radar_bp.set_attribute('points_per_second', str(1000))
         self.radar_bp.set_attribute('range', '50')
         spawn_point = carla.Transform(carla.Location(x=1.5, y=0.0, z=2.8))
         self.radar_sensor = self.world.spawn_actor(self.radar_bp, spawn_point, attach_to=self.vehicle)
+        
         actor_list.append(self.radar_sensor)
+
+
+        # Convert the horizontal and vertical FOV to radians
+        horizontal_fov_rad = np.radians(float(self.radar_bp.get_attribute('horizontal_fov')))
+        vertical_fov_rad = np.radians(float(self.radar_bp.get_attribute('vertical_fov')))
+        min_azimuth_angle_rad = -horizontal_fov_rad / 2
+        max_azimuth_angle_rad = horizontal_fov_rad / 2
+        min_altitude_angle_rad = -vertical_fov_rad / 2
+        max_altitude_angle_rad = vertical_fov_rad / 2
+        print("yo")
+        print(min_altitude_angle_rad ,"-",max_altitude_angle_rad)
+        print(min_altitude_angle_rad ,"-",max_altitude_angle_rad)
+
         # listen to the radar
         self.radar_sensor.listen(lambda data: self.process_radar(data))
         colsensor =self.blueprint_library.find("sensor.other.collision")
@@ -206,13 +224,13 @@ class CarEnv(gym.Env):
         result = np.zeros((image.height, image.width, 3), dtype=np.uint8)
         for label, color in color_map.items():
             result[segmentation_labels == label] = color
-        if (self.show_metrics):
+        #if (self.show_metrics):
             # Display the segmented image
-            cv2.imshow('Segmented Image', result)
-            cv2.waitKey(1)
+            #cv2.imshow('Segmented Image', result)
+            #cv2.waitKey(1)
+        self.front_segmentation_camera =result
 
     def depth_process_image(self, image):
-        print("depth")
         i = np.array(image.raw_data)
         # Reshape the input image
         i2 = i.reshape((IM_HEIGHT, IM_WIDTH, 4))
@@ -220,22 +238,49 @@ class CarEnv(gym.Env):
         # Extract the depth information from the image
         normalized = (i2[:, :, 0] + i2[:, :, 1] * 256 + i2[:, :, 2] * 256 * 256) / (256 * 256 * 256 - 1)
         depth = 1000* normalized
-        depth = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
-        print(depth.shape)
+        # Convert the depth values to logarithmic scale
+        log_depth = np.log(depth + 1)
+        log_depth_norm = (log_depth - np.min(log_depth)) / (np.max(log_depth) - np.min(log_depth))
         # Display the processed image if show_metrics is True
-        if self.show_metrics:
-            cv2.imshow("depth", depth)
-            cv2.waitKey(1)
+        #if self.show_metrics:
+            #cv2.imshow("depth", log_depth_norm)
+            #cv2.waitKey(1)
         # Normalize the image so the values are from 0 to 1 for faster processing
-        self.front_camera = depth
+        self.front_depth_camera = log_depth_norm
 
     def process_radar(self,data):
         # Get the radar data as a numpy array
         radar_data = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
         radar_data=radar_data.reshape((radar_data.shape[0]//4,4))
-       # if self.show_metrics:
-           # print(radar_data.shape)
+        if self.show_metrics:
+           print(radar_data.shape)
         self.radar=radar_data
+        radar_image = np.ones((60,60,2), dtype=float) * 100
+        horizontal_radians = np.radians(float(self.radar_bp.get_attribute('horizontal_fov')))
+        vertical_radians = np.radians(float(self.radar_bp.get_attribute('vertical_fov')))
+
+
+        for i in range (len(radar_data)):
+            radar_data[i][0]
+            normalized_vertical_angle = int(((radar_data[i][0] + vertical_radians/2 ) /  vertical_radians)*60)
+            normalized_horizontal_angle =int(((radar_data[i][1] + horizontal_radians/2 ) / horizontal_radians)*60)
+            radar_image[normalized_vertical_angle][normalized_horizontal_angle][0]= radar_data[i][2]
+            radar_image[normalized_vertical_angle][normalized_horizontal_angle][1]= radar_data[i][3]
+        debug_image=np.zeros((60,60), dtype=float)
+        for i in range (60):
+            for j in range (60):
+                debug_image[i][j]=radar_image[i][j][0]
+                
+
+        
+        
+        cv2.namedWindow('Radar', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Radar', 600, 600)
+        cv2.imshow('Radar', debug_image)
+        cv2.waitKey(1)
+
+
+
 
     def move_walker(self, walker):
         max_distance = 100
@@ -365,7 +410,7 @@ class CarEnv(gym.Env):
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             print("time is up")
             done=True
-        return self.front_camera ,reward, done
+        return self.front_segmentation_camera, self.front_depth_camera, self.radar ,reward, done
 
 
     def destroy_all_actors(self):
@@ -407,8 +452,8 @@ if __name__ == '__main__':
         done = False
         step_count = 0
         while not done:
-            action = 2
-            _, reward, done = env.step(action)
+            action = 4
+            _,_,_, reward, done = env.step(action)
             step_count += 1
             #print(f"Step: {step_count}, Reward: {reward}, Done: {done}")
         env.destroy_all_actors()
