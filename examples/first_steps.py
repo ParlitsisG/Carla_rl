@@ -74,17 +74,30 @@ SHOW_METRICS=True
 MODEL_NAME="dqn"
 AGGREGATE_STATS_EVERY = 10
 
+       
+
 class ActionType(Enum):
-    ACCELERATE = 0
-    SLOW_DOWN = 1
-    BREAK = 2
-    LEAVE_BREAK = 3
-    TURN_LEFT = 4
-    TURN_RIGHT = 5
+    ULTRA_SLOW_ACCELARATION = 0
+    SLOW_ACCELARATION = 1
+    MEDIUM_ACCELARATION = 2
+    HIGH_ACCELARATION = 3
+    SLOW_BREAK = 4
+    MEDIUM_BREAK = 5
+    HIGH_BREAK = 6
+    FULL_BREAK = 7
+    LEAVE_PEDALS = 8
+    LOW_DECCELARATION = 9
+    MEDIUM_DECCELARATION = 10
+    HIGH_DECCELARATION =11
+    SLOW_RELEASE_BREAK =12
+    MEDIUM_RELEASE_BREAK=13
+    HIGH_RELEASE_BREAK =14
+
+    
 
 
 class CarEnv(gym.Env):
-    Show_metrics= SHOW_METRICS
+    show_metrics= SHOW_METRICS
     front_camera = None
     radar =None
     def __init__(self):
@@ -97,6 +110,7 @@ class CarEnv(gym.Env):
         self.brake= 0
         self.previous_accelaration=0
         self.previous_brake=0
+        self.ai_walker_list=[]
 
         
 
@@ -110,18 +124,33 @@ class CarEnv(gym.Env):
         self.vehicle = self.world.spawn_actor(self.bp, self.spawn_point)
         actor_list.append(self.vehicle)
 
-        self.spawn_npc(10,10,self.spawn_point.location)
+        #self.spawn_npc(10,5,self.spawn_point.location)
 
-        self.cam_bp = self.blueprint_library.find("sensor.camera.rgb")
+        self.cam_bp = self.blueprint_library.find("sensor.camera.semantic_segmentation")
         self.cam_bp.set_attribute("image_size_x", f"{IM_WIDTH}")
         self.cam_bp.set_attribute("image_size_y", f"{IM_HEIGHT}")
-        self.cam_bp.set_attribute("fov", "110")
+        self.cam_bp.set_attribute("fov", "60")
+
 
         spawn_point = carla.Transform(carla.Location(x=2.5, z=0.7))  # question specific spawn spots to place the camera except coordinates
         self.camera_sensor = self.world.spawn_actor(self.cam_bp, spawn_point, attach_to=self.vehicle)
         actor_list.append(self.camera_sensor)
+
+
+
+        self.depth_cam_bp = self.blueprint_library.find("sensor.camera.depth")
+        self.depth_cam_bp.set_attribute("image_size_x", f"{IM_WIDTH}")
+        self.depth_cam_bp.set_attribute("image_size_y", f"{IM_HEIGHT}")
+        self.depth_cam_bp.set_attribute("fov", "60")
+
+        spawn_point = carla.Transform(carla.Location(x=2.5, z=0.7)) 
+        self.depth_camera_sensor = self.world.spawn_actor(self.depth_cam_bp, spawn_point, attach_to=self.vehicle)
+        actor_list.append(self.depth_camera_sensor)
+
+
         # listen to the camera
-        self.camera_sensor.listen(lambda data: self.process_img(data))
+        self.camera_sensor.listen(lambda data: self.process_semantic_image(data))
+        self.depth_camera_sensor.listen(lambda depth_data: self.depth_process_image(depth_data))
         # Get the blueprint for the radar sensor
         self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar')
         # Set the attributes for the radar sensor
@@ -148,21 +177,63 @@ class CarEnv(gym.Env):
         self.collision_hist.append(impact)
 
 
-    def process_img(self,image):
+    def process_image(self,image):
         i = np.array(image.raw_data)
         #print(i.shape)# check image input
         i2=i.reshape((IM_HEIGHT,IM_WIDTH,4))
         i3=i2[:,:,:3] #if we want to exclude alpha
-        if self.Show_metrics:
-            cv2.imshow("",i3)
+        if self.show_metrics:
+            cv2.imshow("segmantation",i3)
             cv2.waitKey(1)
         self.front_camera= i3/255 # normalize so the values are from 0 to 1 for faster proccessing
+
+    def process_semantic_image(self,image):
+        # Convert the semantic segmentation image to a NumPy array
+        img_data = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+        img_data = img_data.reshape((image.height, image.width, 4))
+
+        # Extract the segmentation labels
+        segmentation_labels = img_data[:, :, 2]
+
+        # Define the color mapping for pedestrians, cars, and background
+        color_map = {
+            0: [0, 0, 0],      # Background
+            4: [255, 0, 0],    # Pedestrians
+            10: [0, 255, 0],   # Cars
+        }
+
+        # Apply the color mapping
+        result = np.zeros((image.height, image.width, 3), dtype=np.uint8)
+        for label, color in color_map.items():
+            result[segmentation_labels == label] = color
+        if (self.show_metrics):
+            # Display the segmented image
+            cv2.imshow('Segmented Image', result)
+            cv2.waitKey(1)
+
+    def depth_process_image(self, image):
+        print("depth")
+        i = np.array(image.raw_data)
+        # Reshape the input image
+        i2 = i.reshape((IM_HEIGHT, IM_WIDTH, 4))
+        normalized =np.zeros((IM_HEIGHT, IM_WIDTH, 1))
+        # Extract the depth information from the image
+        normalized = (i2[:, :, 0] + i2[:, :, 1] * 256 + i2[:, :, 2] * 256 * 256) / (256 * 256 * 256 - 1)
+        depth = 1000* normalized
+        depth = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
+        print(depth.shape)
+        # Display the processed image if show_metrics is True
+        if self.show_metrics:
+            cv2.imshow("depth", depth)
+            cv2.waitKey(1)
+        # Normalize the image so the values are from 0 to 1 for faster processing
+        self.front_camera = depth
 
     def process_radar(self,data):
         # Get the radar data as a numpy array
         radar_data = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
         radar_data=radar_data.reshape((radar_data.shape[0]//4,4))
-       # if self.Show_metrics:
+       # if self.show_metrics:
            # print(radar_data.shape)
         self.radar=radar_data
 
@@ -172,8 +243,7 @@ class CarEnv(gym.Env):
                                                                 y=random.uniform(-max_distance, max_distance), z=0.0)
         walker_controller_bp = self.blueprint_library.find('controller.ai.walker')
         walker_controller = self.world.spawn_actor(walker_controller_bp, carla.Transform(), walker)
-        actor_list.append(walker_controller)
-        self.walker_controller_list.append(walker_controller)
+        self.ai_walker_list.append(walker_controller)
         walker_controller.start()
         walker_controller.go_to_location(target_location)
 
@@ -217,55 +287,55 @@ class CarEnv(gym.Env):
             if npc2 is None:
                 print(f"Failed to spawn walker {i + 1} after {max_attempts} attempts")
                 continue
-            #self.move_walker(npc2)
+            self.move_walker(npc2)
             print(f"Created walker {i + 1}")
             actor_list.append(npc2)
         
 
     def step(self, function):
-        if(function==0):                                                                                           # ultra slow accelaration (for example stop sign going in a blind turn without priority) #possibly not needed
+        if(function==ActionType.ULTRA_SLOW_ACCELARATION.value):                                                                                           # ultra slow accelaration (for example stop sign going in a blind turn without priority) #possibly not needed
             self.accelaration+= 0.1
             self.brake=0
-        elif (function == 1):                                                                                      #slightly accelarate 
+        elif (function == ActionType.SLOW_ACCELARATION.value):                                                                                      #slightly_accelarate 
             self.accelaration+= 0.2
             self.brake=0
-        elif (function == 2):                                                                                      # accelarate medium
+        elif (function == ActionType.MEDIUM_ACCELARATION.value):                                                                                      # accelarate medium
             self.accelaration+= 0.4
             self.brake=0
-        elif (function == 3):                                                                                      # accelarate heavily
+        elif (function ==  ActionType.HIGH_ACCELARATION.value):                                                                                      # accelarate heavily
             self.accelaration+= 0.6
             self.brake=0
-        elif (function == 4):                                                                                       #slighty increase break
+        elif (function ==  ActionType.SLOW_BREAK.value):                                                                                       #slighty increase break
             self.accelaration+= 0.0
             self.brake+=0.1
-        elif (function == 5):                                                                                       #  increase break medium
+        elif (function == ActionType.MEDIUM_BREAK.value):                                                                                       #  increase break medium
             self.accelaration=0.0
             self.brake+= 0.3
-        elif (function == 6):                                                                                       # heavily increase break
+        elif (function == ActionType.HIGH_BREAK.value):                                                                                       # heavily increase break
             self.accelaration= 0.0
             self.brake+=0.5
-        elif (function == 7):                                                                                       #  full break 
+        elif (function == ActionType.FULL_BREAK.value):                                                                                       #  full break 
             self.accelaration= 0.0
             self.brake=1.0
-        elif (function == 8):                                                                                       # dont press any pedals
+        elif (function == ActionType.LEAVE_PEDALS.value):                                                                                       # dont press any pedals
             self.accelaration= 0.0
             self.brake=0.0
-        elif (function == 9):                                                                                      #slightly deccelarate 
+        elif (function == ActionType.LOW_DECCELARATION.value):                                                                                      #slightly deccelarate 
             self.accelaration-= 0.2
             self.brake=0
-        elif (function == 10):                                                                                      # deccelarate medium
+        elif (function == ActionType.MEDIUM_DECCELARATION.value):                                                                                      # deccelarate medium
             self.accelaration-= 0.4
             self.brake=0
-        elif (function == 11):                                                                                      # deccelarate heavily
+        elif (function == ActionType.HIGH_DECCELARATION.value):                                                                                      # deccelarate heavily
             self.accelaration-= 0.6
             self.brake=0
-        elif (function == 12):                                                                                       #slighty decrease break
+        elif (function == ActionType.SLOW_RELEASE_BREAK.value):                                                                                       #slighty decrease break
             self.accelaration= 0.0
             self.brake-=0.1
-        elif (function == 13):                                                                                       #  increase break medium
+        elif (function == ActionType.MEDIUM_RELEASE_BREAK.value):                                                                                       #  increase break medium
             self.accelaration=0.0
             self.brake-= 0.3
-        elif (function == 14):                                                                                       # heavily increase break
+        elif (function == ActionType.HIGH_RELEASE_BREAK.value):                                                                                       # heavily increase break
             self.accelaration= 0.0
             self.brake-=0.5
         
@@ -277,24 +347,21 @@ class CarEnv(gym.Env):
 
         velocity= self.vehicle.get_velocity()
         done= False
-        reward=0
+        reward=1
         kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
         if (len(self.collision_hist) != 0):
             done =True
             reward = -200
         elif kmh <10:  
             done =False
-            reward== -1
-        elif self.previous_brake==0 and self.brake==1.0:
-            reward+= -20
-        elif (self.brake - self.previous_brake)>=0.5:
+            reward += -1
+        if self.previous_brake==0 and self.brake==1.0:
+            reward += -20
+        if (self.brake - self.previous_brake)>=0.5:
             reward= -10
-        elif(self.accelaration-self.previous_accelaration)>=0.5:
+        if(self.accelaration-self.previous_accelaration)>=0.5:
             reward= -10
         # detect obstacle upfront to check if safety distance exists penalize if not |||| this will be added
-        else:
-            done = False
-            reward=1
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             print("time is up")
             done=True
@@ -304,18 +371,31 @@ class CarEnv(gym.Env):
     def destroy_all_actors(self):
         global actor_list
         print("initialize destroy")
+        for controller in (self.ai_walker_list):
+          if controller is not None:
+            try:
+                controller.stop()
+                print(f"Destroying walker controller: {controller.id}")
+                controller.destroy()
+                print(f"Destroyed walker controller: {controller.id}")
+            except Exception as e:
+                print(f"Error while destroying walker controller: {controller.id}, {e}")
+      
         for actor in reversed(actor_list):
             if actor is not None:
                 try:
+                    print(f"Destroying actor: {actor.type_id}")
                     if 'vehicle' in actor.type_id:
                         actor.set_autopilot(enabled=False)
-                    print(f"Destroying actor: {actor.id}")
+                        print(f"Destroying actor: {actor.id}")
                     actor.destroy()
                     print(f"Destroying actor: {actor.id}")
                 except Exception as e:
                     print(f"Error while destroying actor: {actor.id}, {e}")
         print("destroyed")
-        actor_list = []
+        actor_list = [] 
+        self.ai_walker_list=[]
+        
 
 
 if __name__ == '__main__':
@@ -330,6 +410,6 @@ if __name__ == '__main__':
             action = 2
             _, reward, done = env.step(action)
             step_count += 1
-            print(f"Step: {step_count}, Reward: {reward}, Done: {done}")
+            #print(f"Step: {step_count}, Reward: {reward}, Done: {done}")
         env.destroy_all_actors()
 
