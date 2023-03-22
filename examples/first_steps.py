@@ -109,6 +109,7 @@ class CarEnv(gym.Env):
         self.previous_brake=0
         self.set_up_car= Sync_Actor()
         
+        
 
 
     def reset(self):
@@ -168,13 +169,12 @@ class CarEnv(gym.Env):
         self.brake= min(1.0,self.brake)
         self.accelaration=max(0.0,self.accelaration)
         self.accelaration=min(1.0,self.accelaration)
-        self.vehicle.apply_control(carla.VehicleControl(throttle=self.accelaration , brake=self.brake))
-
-        velocity= self.vehicle.get_velocity()
+        self.set_up_car.move(self.accelaration,self.brake)
+        velocity= self.set_up_car.vehicle.get_velocity()
         done= False
         reward=1
         kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
-        if (len(self.collision_hist) != 0):
+        if (len(self.set_up_car.collision_hist) != 0):
             done =True
             reward = -1
         elif kmh <10:  
@@ -190,7 +190,7 @@ class CarEnv(gym.Env):
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             print("time is up")
             done=True
-        return self.front_segmentation_camera, self.front_depth_camera, self.radar ,reward, done
+        return reward, done
     
 
 
@@ -206,9 +206,8 @@ if __name__ == '__main__':
         done = False
         step_count = 0
         while not done:
-            env.world.tick()
             action = 1
-            _,_,_, reward, done = env.step(action)
+            reward, done = env.step(action)
             
             step_count += 1
             #print(f"Step: {step_count}, Reward: {reward}, Done: {done}")

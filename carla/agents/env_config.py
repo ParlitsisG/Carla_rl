@@ -141,7 +141,9 @@ class Sync_Actor():
         self.blueprint_library = self.world.get_blueprint_library()
         self.bp = self.blueprint_library.filter("model3")[0]
         self.npc_manager= NPC()
+        self.show_metrics=SHOW_METRICS
         self.actor_list=[]
+        self.vehicle = None
     def spawn_car(self):
         settings = self.world.get_settings()
         settings.synchronous_mode = self.synchronous_mode
@@ -223,7 +225,7 @@ class Sync_Actor():
     def process_collision(self, impact):
         self.collision_hist.append(impact)
 
-    def process_semantic_image(self,image,sensor_queue):
+    def process_semantic_image(self,sensor_queue,image):
         # Convert the semantic segmentation image to a NumPy array
         img_data = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         img_data = img_data.reshape((image.height, image.width, 4))
@@ -248,9 +250,8 @@ class Sync_Actor():
             cv2.imshow('Segmented Image', result)
             cv2.waitKey(1)
         sensor_queue.put( ("segmentation", result), True, 1.0 )
-        self.received_data_count += 1
 
-    def depth_process_image(self, image,sensor_queue):
+    def depth_process_image(self, sensor_queue,image):
         i = np.array(image.raw_data)
         # Reshape the input image
         i2 = i.reshape((IM_HEIGHT, IM_WIDTH, 4))
@@ -268,22 +269,29 @@ class Sync_Actor():
         # Normalize the image so the values are from 0 to 1 for faster processing
         self.front_depth_camera_buffer = log_depth_norm
         sensor_queue.put( ("depth", log_depth_norm), True, 1.0 )
-        self.received_data_count += 1
 
-    def process_radar(self,data,sensor_queue):
+    def process_radar(self,sensor_queue,data):
         # Get the radar data as a numpy array
         radar_data = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
         radar_data=radar_data.reshape((radar_data.shape[0]//4,4))
        
         
         radar_image = np.ones((60,60,2), dtype=float) * 100
-        horizontal_radians = np.radians(float(self.radar_bp.get_attribute('horizontal_fov')))
-        vertical_radians = np.radians(float(self.radar_bp.get_attribute('vertical_fov')))
+        horizontal_radians = np.radians(15.0)
+        vertical_radians = np.radians(15.0)
 
         iterations=min(len(radar_data),60*60)
         for i in range (iterations):
-            normalized_vertical_angle = int(((radar_data[i][0] + vertical_radians/2 ) /  vertical_radians)*60)
-            normalized_horizontal_angle =int(((radar_data[i][1] + horizontal_radians/2 ) / horizontal_radians)*60)
+            vertical=min(radar_data[i][0],vertical_radians)
+            vertical=max( vertical,-vertical_radians)
+            horizontal=min(radar_data[i][1],horizontal_radians)
+            horizontal=max(horizontal,-horizontal_radians)
+
+            normalized_vertical_angle = (vertical +vertical_radians)/  (vertical_radians*2)
+            normalized_horizontal_angle =(horizontal+horizontal_radians) / (horizontal_radians*2)
+        
+            normalized_horizontal_angle=int(normalized_horizontal_angle*59.0)
+            normalized_vertical_angle= int(normalized_vertical_angle*59.0) 
             radar_image[normalized_vertical_angle][normalized_horizontal_angle][0]= radar_data[i][2]
             radar_image[normalized_vertical_angle][normalized_horizontal_angle][1]= radar_data[i][3]
         debug_image=np.zeros((60,60), dtype=float)
@@ -292,12 +300,16 @@ class Sync_Actor():
                 debug_image[i][j]=radar_image[i][j][0]
         
         sensor_queue.put( ("radar", radar_image), True, 1.0 )
-        self.received_data_count += 1      
         if self.show_metrics:
             cv2.namedWindow('Radar', cv2.WINDOW_NORMAL)
             cv2.resizeWindow('Radar', 600, 600)
             cv2.imshow('Radar', debug_image)
             cv2.waitKey(1)
+
+
+    def move(self,accelarate , press_brake):
+        self.vehicle.apply_control(carla.VehicleControl(throttle=accelarate, brake=press_brake))
+
 
     def destroy_all_actors(self):
         self.npc_manager.destroy_all_actors()
