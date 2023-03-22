@@ -23,6 +23,7 @@ import carla
 
 IM_WIDTH=160
 IM_HEIGHT=120
+SAFETY_DIST= 2
 SHOW_METRICS=True
 
 class NPC():
@@ -144,10 +145,14 @@ class Sync_Actor():
         self.show_metrics=SHOW_METRICS
         self.actor_list=[]
         self.vehicle = None
+        self.depth_camera_data= None
+        self.segmentation_camera_data= None
+        self.radar_data= None
+
     def spawn_car(self):
         settings = self.world.get_settings()
         settings.synchronous_mode = self.synchronous_mode
-        settings.fixed_delta_seconds = None  # You can set a fixed time step for each tick here
+        settings.fixed_delta_seconds = None# You can set a fixed time step for each tick here
         self.world.apply_settings(settings)
 
 
@@ -156,7 +161,7 @@ class Sync_Actor():
         self.vehicle = self.world.spawn_actor(self.bp, self.spawn_point)
         self.actor_list.append(self.vehicle)
 
-        self.npc_manager.spawn_npc(10,2,self.spawn_point.location)
+        self.npc_manager.spawn_npc(10,0,self.spawn_point.location)
         
         queue = Queue()
         
@@ -216,16 +221,26 @@ class Sync_Actor():
         self.actor_list.append(self.colsensor)
         #check for imapcts
         self.colsensor.listen (lambda impact: self.process_collision(impact))
+        print("outside")
+        self.world.tick()
+        print("inside")
+        sensor_data ={'segmentation': None ,'depth': None , 'radar':None}
+        for i in range(3):
+            name, data = queue.get(True, 1.0)
+            sensor_data[name] = data
+            self.depth_camera_data= sensor_data['depth']
+            self.segmentation_camera_data =  sensor_data['segmentation']
+            self.radar_data = sensor_data['radar']
+        
+        
+        
 
-        self.world.tick()
-        queue = Queue()
-        self.world.tick()
 
         
     def process_collision(self, impact):
         self.collision_hist.append(impact)
 
-    def process_semantic_image(self,sensor_queue,image):
+    def process_semantic_image(self,queue,image):
         # Convert the semantic segmentation image to a NumPy array
         img_data = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         img_data = img_data.reshape((image.height, image.width, 4))
@@ -249,9 +264,9 @@ class Sync_Actor():
             # Display the segmented image
             cv2.imshow('Segmented Image', result)
             cv2.waitKey(1)
-        sensor_queue.put( ("segmentation", result), True, 1.0 )
+        queue.put( ('segmentation', result), True, 1.0 )
 
-    def depth_process_image(self, sensor_queue,image):
+    def depth_process_image(self,queue,image):
         i = np.array(image.raw_data)
         # Reshape the input image
         i2 = i.reshape((IM_HEIGHT, IM_WIDTH, 4))
@@ -259,6 +274,7 @@ class Sync_Actor():
         # Extract the depth information from the image
         normalized = (i2[:, :, 0] + i2[:, :, 1] * 256 + i2[:, :, 2] * 256 * 256) / (256 * 256 * 256 - 1)
         depth = 1000* normalized
+        queue.put( ('depth', depth), True, 1.0 )
         # Convert the depth values to logarithmic scale
         log_depth = np.log(depth + 1)
         log_depth_norm = (log_depth - np.min(log_depth)) / (np.max(log_depth) - np.min(log_depth))
@@ -267,24 +283,23 @@ class Sync_Actor():
             cv2.imshow("depth", log_depth_norm)
             cv2.waitKey(1)
         # Normalize the image so the values are from 0 to 1 for faster processing
-        self.front_depth_camera_buffer = log_depth_norm
-        sensor_queue.put( ("depth", log_depth_norm), True, 1.0 )
+        
 
-    def process_radar(self,sensor_queue,data):
+    def process_radar(self,queue,data):
         # Get the radar data as a numpy array
-        radar_data = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
-        radar_data=radar_data.reshape((radar_data.shape[0]//4,4))
+        radar_measurment = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
+        radar_measurment=radar_measurment.reshape((radar_measurment.shape[0]//4,4))
        
         
         radar_image = np.ones((60,60,2), dtype=float) * 100
         horizontal_radians = np.radians(15.0)
         vertical_radians = np.radians(15.0)
 
-        iterations=min(len(radar_data),60*60)
+        iterations=min(len(radar_measurment),60*60)
         for i in range (iterations):
-            vertical=min(radar_data[i][0],vertical_radians)
+            vertical=min(radar_measurment[i][0],vertical_radians)
             vertical=max( vertical,-vertical_radians)
-            horizontal=min(radar_data[i][1],horizontal_radians)
+            horizontal=min(radar_measurment[i][1],horizontal_radians)
             horizontal=max(horizontal,-horizontal_radians)
 
             normalized_vertical_angle = (vertical +vertical_radians)/  (vertical_radians*2)
@@ -292,14 +307,14 @@ class Sync_Actor():
         
             normalized_horizontal_angle=int(normalized_horizontal_angle*59.0)
             normalized_vertical_angle= int(normalized_vertical_angle*59.0) 
-            radar_image[normalized_vertical_angle][normalized_horizontal_angle][0]= radar_data[i][2]
-            radar_image[normalized_vertical_angle][normalized_horizontal_angle][1]= radar_data[i][3]
+            radar_image[normalized_vertical_angle][normalized_horizontal_angle][0]= radar_measurment[i][2]
+            radar_image[normalized_vertical_angle][normalized_horizontal_angle][1]= radar_measurment[i][3]
         debug_image=np.zeros((60,60), dtype=float)
         for i in range (60):
             for j in range (60):
                 debug_image[i][j]=radar_image[i][j][0]
         
-        sensor_queue.put( ("radar", radar_image), True, 1.0 )
+        queue.put( ('radar', radar_image), True, 1.0 )
         if self.show_metrics:
             cv2.namedWindow('Radar', cv2.WINDOW_NORMAL)
             cv2.resizeWindow('Radar', 600, 600)
@@ -328,3 +343,37 @@ class Sync_Actor():
             print("destroyed")
             self.actor_list = [] 
     
+    def detect_obstacle(self):
+        safe=True
+        self.show_debug()
+        print("breaching")
+        distance = 50
+        safety_distance_breached=0
+        for i in range (IM_HEIGHT):
+            for j in range(IM_WIDTH):
+                # if green or red
+                if self.segmentation_camera_data[i][j][0]!= 0 or self.segmentation_camera_data[i][j][1] !=0:
+                    obs_exists=True
+                    if self.depth_camera_data[i][j] < 2.0:
+                        safe=False
+                        if(distance>self.depth_camera_data[i][j]):
+                            distance= self.depth_camera_data[i][j]
+        velocity= self.vehicle.get_velocity()
+        kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
+        safe_distance =(kmh* (1000/3600) / (2 * 7.5))  #7.5 decelaration for standard conditions
+        if distance<50 and safe_distance-distance<0:
+            safety_distance_breached=distance-safe_distance
+        return distance , safe ,safety_distance_breached
+
+    def show_debug(self):
+            cv2.imshow("depth", self.depth_camera_data)
+            cv2.imshow("segmentation", self.segmentation_camera_data)
+            cv2.waitKey(1)
+                    
+
+
+    
+
+
+    class env_dict():
+        pass
