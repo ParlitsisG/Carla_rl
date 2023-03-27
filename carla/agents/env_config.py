@@ -36,26 +36,6 @@ class NPC():
         self.blueprint_library = self.world.get_blueprint_library()
         self.world = self.client.get_world()
 
-    def move_walker(self, walker):
-        #print("Entering move_walker function")
-        max_distance = 100
-        target_location = walker.get_location() + carla.Location(x=random.uniform(-max_distance, max_distance),
-                                                                y=random.uniform(-max_distance, max_distance), z=0.0)
-        walker_controller_bp = self.blueprint_library.find('controller.ai.walker')
-        walker_controller = self.world.spawn_actor(walker_controller_bp, carla.Transform(), walker)
-        self.ai_walker_list.append(walker_controller)
-        walker_controller.start()
-        # Cast target_location to carla.Location
-        target_location = carla.Location(target_location.x, target_location.y, target_location.z)
-        print("Walker controller started")
-           # Add a timeout for the go_to_location call
-        try:
-            walker_controller.go_to_location(target_location)
-            print("Walker controller set target location")
-        except Exception as e:
-            print("Error in go_to_location:", e)
-        print("Exiting move_walker function")
-
 
     def generate_spawn_point_near_location(self, location, radius):
         print("enter generate_spawn_point_near_location")
@@ -78,31 +58,69 @@ class NPC():
             # Spawn the vehicle at a random location in the world
             npc = None
             self.bp = random.choice(self.vehicle_blueprints)
+            
+            counter=0
             while npc is None:
                 spawn_point = self.generate_spawn_point_near_location(main_actor_location, radius=100)
                 npc = self.world.try_spawn_actor(self.bp, spawn_point)
+                counter +=1
+                if counter==10:
+                    print("failed to spawn car")
+                    break
+                    
+
             npc.set_autopilot(True)
             print('created %s' % npc.type_id)
-            self.actor_list.append(npc)
+            if npc is not None:
+                self.actor_list.append(npc)
         print('cars done')
+
+
+
+        SpawnActor = carla.command.SpawnActor
         # Spawn the pedestrians
         self.walker_controller_list = []
+        batch = []
+        walker_speed = []
+        walkers_list = []
+        spawn_points = []
         max_attempts = 10  # Maximum number of attempts for each pedestrian
         for i in range(number_of_walkers):
-            npc2 = None
-            bp2 = random.choice(self.walker_blueprints)
-            for _ in range(max_attempts):
-                spawn_point = self.generate_spawn_point_near_location(main_actor_location, radius=100)
-                npc2 = self.world.try_spawn_actor(bp2, spawn_point)
-                if npc2 is not None:
-                    break
-                print(f"Attempt {attempt + 1} failed to spawn walker {i + 1}")
-            if npc2 is None:
-                print(f"Failed to spawn walker {i + 1} after {max_attempts} attempts")
-                continue
-            self.move_walker(npc2)
-            print(f"Created walker {i + 1}")
-            self.actor_list.append(npc2)
+            spawn_point = self.generate_spawn_point_near_location(main_actor_location, radius=100)
+            print(f"found spot {i + 1}")
+            spawn_points.append(spawn_point)
+
+       
+        #how many run how many walk
+        pedestrian_split=0.5
+        for spawn_point in spawn_points:
+            walker_bp = random.choice(self.walker_blueprints)
+            # set the max speed
+            if walker_bp.has_attribute('speed'):
+                if (random.random() > pedestrian_split):
+                # walking
+                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
+                else:
+                    # running
+                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
+            batch.append(SpawnActor(walker_bp, spawn_point))
+        results =  self.client.apply_batch_sync(batch, True)
+
+
+        # 3. we spawn the walker controller
+        batch = []
+        walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+        for i in range(len(walkers_list)):
+            batch.append(SpawnActor(walker_controller_bp, carla.Transform(), walkers_list[i]["id"]))
+        results =  self.client.apply_batch_sync(batch, True)
+        for i in range(len(results)):
+            walkers_list[i]["con"] = results[i].actor_id
+        # 4. we put altogether the walkers and controllers id to get the objects from their id
+        for i in range(len(walkers_list)):
+            self.walker_controller_list.append(walkers_list[i]["con"])
+            self.walker_controller_list.append(walkers_list[i]["id"])
+        # wait for a tick to ensure client receives the last transform of the walkers we have just created
+        #self.world.tick()
         
     def destroy_all_actors(self):
         print("initialize_npc_destroy")
@@ -136,7 +154,7 @@ class NPC():
 class Sync_Actor():
     def __init__(self):
         self.client = carla.Client("localhost", 2000)
-        self.client.set_timeout(80.0)  # duration for errors
+        self.client.set_timeout(30.0)  # duration for errors
         self.synchronous_mode = True
         self.world = self.client.get_world()
         self.blueprint_library = self.world.get_blueprint_library()
@@ -161,7 +179,7 @@ class Sync_Actor():
         self.vehicle = self.world.spawn_actor(self.bp, self.spawn_point)
         self.actor_list.append(self.vehicle)
 
-        self.npc_manager.spawn_npc(10,0,self.spawn_point.location)
+        self.npc_manager.spawn_npc(10,10,self.spawn_point.location)
         
         queue = Queue()
         
@@ -221,8 +239,10 @@ class Sync_Actor():
         self.actor_list.append(self.colsensor)
         #check for imapcts
         self.colsensor.listen (lambda impact: self.process_collision(impact))
+
         print("outside")
         self.world.tick()
+        
         print("inside")
         sensor_data ={'segmentation': None ,'depth': None , 'radar':None}
         for i in range(3):
@@ -362,7 +382,7 @@ class Sync_Actor():
         kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
         safe_distance =(kmh* (1000/3600) / (2 * 7.5))  #7.5 decelaration for standard conditions
         if distance<50 and safe_distance-distance<0:
-            safety_distance_breached=distance-safe_distance
+            safety_distance_breached=safe_distance-distance
         return distance , safe ,safety_distance_breached
 
     def show_debug(self):

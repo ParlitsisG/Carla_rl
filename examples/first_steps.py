@@ -68,7 +68,7 @@ MIN_REWARD =-200
 DISCOUNT=0.99
 EPISODES =100
 e=1
-SECONDS_PER_EPISODE=10.0
+SECONDS_PER_EPISODE=15.0
 IM_WIDTH=160
 IM_HEIGHT=120
 e_decay=0.95
@@ -142,7 +142,8 @@ class CarEnv(gym.Env):
         self.accelaration=max(0.0,self.accelaration)
         self.accelaration=min(1.0,self.accelaration)
         self.set_up_car.world.tick()
-        self.set_up_car.move(self.accelaration,self.brake)
+        #self.set_up_car.move(self.accelaration,self.brake)
+        self.set_up_car.move(0.2,0.0)
         velocity= self.set_up_car.vehicle.get_velocity()
         done= False
         reward=1
