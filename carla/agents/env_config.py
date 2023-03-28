@@ -24,11 +24,13 @@ import carla
 IM_WIDTH=160
 IM_HEIGHT=120
 SAFETY_DIST= 2
-SHOW_METRICS=True
+SHOW_METRICS=False
 
 class NPC():
     def __init__(self):
-        self.ai_walker_list=[]
+        self.walker_controller_list = []
+        self.walker_ids=[]
+        self.controller_ids=[]
         self.actor_list= []
         self.client = carla.Client("localhost", 2000)
         self.client.set_timeout(80.0)  # duration for errors
@@ -51,8 +53,63 @@ class NPC():
         # Get the blueprint for all vehicles and all walkers
         self.walker_blueprints = self.blueprint_library.filter('walker.pedestrian.*')
         self.vehicle_blueprints =self.blueprint_library.filter('vehicle.*.*')
+
+        SpawnActor = carla.command.SpawnActor
+        # Spawn the pedestrians
+        batch_pedestrians = []
+        batch_controllers = []
+        spawn_points = []
+        for i in range(number_of_walkers):
+            spawn_point = self.generate_spawn_point_near_location(main_actor_location,radius=100)            
+            print(f"found spot {i + 1}")
+            spawn_points.append(spawn_point)
+            
+
+       
+        #how many run how many walk
+        for spawn_point in spawn_points:
+            walker_bp = random.choice(self.walker_blueprints)
+
+            # Create a SpawnActor command for each pedestrian and add it to the batch
+            spawn_command = carla.command.SpawnActor(walker_bp, spawn_point)
+            batch_pedestrians.append(spawn_command)
+
+        results_pedestrians = self.client.apply_batch_sync(batch_pedestrians, True)
+
+        walker_controller_bp = self.blueprint_library.find('controller.ai.walker')
+
+        for i, result in enumerate(results_pedestrians):
+            if result.error:
+                print(f"Error: {result.error}")
+            else:
+                print(f"Spawned walker: {result.actor_id}")
+                self.walker_ids.append(result.actor_id)
+            
+
+                # Create a command to spawn a walker controller for each pedestrian
+                controller_command = carla.command.SpawnActor(walker_controller_bp, carla.Transform(), parent_id=result.actor_id)
+                batch_controllers.append(controller_command)
         
-        # Spawn the vehicles
+        # Apply the batch and get the results for controllers
+        results_controllers = self.client.apply_batch_sync(batch_controllers, True)
+
+        for result in results_controllers:
+            if result.error:
+                print(f"Error: {result.error}")
+            else:
+                print(f"Spawned walker controller: {result.actor_id}")
+                self.controller_ids.append(result.actor_id)
+                self.actor_list.append(self.world.get_actor(result.actor_id))
+                self.world.tick()
+        # Set target speed for pedestrian controllers
+        for controller_id in self.controller_ids:
+            controller = self.world.get_actor(controller_id)
+            if controller is not None:
+                target_speed = random.uniform(0.5, 2)  # Randomize the target speed between 0.5 and 2 m/s
+                controller.start()
+                controller.go_to_location(controller.get_location())  # This is needed to initialize the controller
+                controller.set_max_speed(target_speed)
+         # Spawn the vehicles
         for i in range(number_of_vehicles):
             # Choose a random blueprint for the vehicle
             # Spawn the vehicle at a random location in the world
@@ -67,76 +124,25 @@ class NPC():
                 if counter==10:
                     print("failed to spawn car")
                     break
-                    
-
-            npc.set_autopilot(True)
+            npc.set_autopilot(enabled=True)
             print('created %s' % npc.type_id)
             if npc is not None:
                 self.actor_list.append(npc)
+                self.world.tick()
+
         print('cars done')
 
 
-
-        SpawnActor = carla.command.SpawnActor
-        # Spawn the pedestrians
-        self.walker_controller_list = []
-        batch = []
-        walker_speed = []
-        walkers_list = []
-        spawn_points = []
-        max_attempts = 10  # Maximum number of attempts for each pedestrian
-        for i in range(number_of_walkers):
-            spawn_point = self.generate_spawn_point_near_location(main_actor_location, radius=100)
-            print(f"found spot {i + 1}")
-            spawn_points.append(spawn_point)
-
-       
-        #how many run how many walk
-        pedestrian_split=0.5
-        for spawn_point in spawn_points:
-            walker_bp = random.choice(self.walker_blueprints)
-            # set the max speed
-            if walker_bp.has_attribute('speed'):
-                if (random.random() > pedestrian_split):
-                # walking
-                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
-                else:
-                    # running
-                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
-            batch.append(SpawnActor(walker_bp, spawn_point))
-        results =  self.client.apply_batch_sync(batch, True)
-
-
-        # 3. we spawn the walker controller
-        batch = []
-        walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
-        for i in range(len(walkers_list)):
-            batch.append(SpawnActor(walker_controller_bp, carla.Transform(), walkers_list[i]["id"]))
-        results =  self.client.apply_batch_sync(batch, True)
-        for i in range(len(results)):
-            walkers_list[i]["con"] = results[i].actor_id
-        # 4. we put altogether the walkers and controllers id to get the objects from their id
-        for i in range(len(walkers_list)):
-            self.walker_controller_list.append(walkers_list[i]["con"])
-            self.walker_controller_list.append(walkers_list[i]["id"])
-        # wait for a tick to ensure client receives the last transform of the walkers we have just created
-        #self.world.tick()
+        
         
     def destroy_all_actors(self):
-        print("initialize_npc_destroy")
-        for controller in (self.ai_walker_list):
-            print("initialize_npc_destroy")
-            for controller in (self.ai_walker_list):
-                if controller is not None:
-                    try:
-                        controller.stop()
-                        print(f"Destroying walker controller: {controller.id}")
-                        controller.destroy()
-                        print(f"Destroyed walker controller: {controller.id}")
-                    except Exception as e:
-                        print(f"Error while destroying walker controller: {controller.id}, {e}")
-        
-        for actor in reversed(self.actor_list):
+        print("initialize_npc_destroy")      
+        settings = self.world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        self.world.apply_settings(settings)
+
+        for actor in (self.actor_list):
             if actor is not None:
                     try:
                         print(f"Destroying actor: {actor.type_id}")
@@ -148,8 +154,19 @@ class NPC():
                     except Exception as e:
                         print(f"Error while destroying actor: {actor.id}, {e}")
             print("destroyed")
-            self.actor_list = [] 
-            self.ai_walker_list=[]
+        # Destroy pedestrians and their controllers
+        for walker_id, controller_id in zip(self.walker_ids, self.controller_ids):
+            walker = self.world.get_actor(walker_id)
+            controller = self.world.get_actor(controller_id)
+            if controller is not None:
+                controller.stop()
+                controller.destroy()
+            if walker is not None:
+                walker.destroy()
+        self.walker_ids =[]
+        self.controller_ids=[]
+        self.actor_list =[]
+        time.sleep(0.5)
 
 class Sync_Actor():
     def __init__(self):
@@ -170,7 +187,7 @@ class Sync_Actor():
     def spawn_car(self):
         settings = self.world.get_settings()
         settings.synchronous_mode = self.synchronous_mode
-        settings.fixed_delta_seconds = None# You can set a fixed time step for each tick here
+        settings.fixed_delta_seconds = 0.1# You can set a fixed time step for each tick here
         self.world.apply_settings(settings)
 
 
@@ -179,7 +196,7 @@ class Sync_Actor():
         self.vehicle = self.world.spawn_actor(self.bp, self.spawn_point)
         self.actor_list.append(self.vehicle)
 
-        self.npc_manager.spawn_npc(10,10,self.spawn_point.location)
+
         
         queue = Queue()
         
@@ -240,17 +257,25 @@ class Sync_Actor():
         #check for imapcts
         self.colsensor.listen (lambda impact: self.process_collision(impact))
 
-        print("outside")
-        self.world.tick()
         
-        print("inside")
         sensor_data ={'segmentation': None ,'depth': None , 'radar':None}
-        for i in range(3):
-            name, data = queue.get(True, 1.0)
-            sensor_data[name] = data
+        while sensor_data['segmentation'] is None or sensor_data['depth'] is None or sensor_data[ 'radar'] is None:
+            self.world.tick()
+            for i in range(3):
+                name, data = queue.get(True, 1.0)
+                sensor_data[name] = data
+                if sensor_data[name] is None:
+                    print(name)
+                    time.sleep(0.1)
+                    print("tick_error")
+                    continue
+                
             self.depth_camera_data= sensor_data['depth']
             self.segmentation_camera_data =  sensor_data['segmentation']
             self.radar_data = sensor_data['radar']
+        self.npc_manager.spawn_npc(10,10,self.spawn_point.location)
+        self.ticker()
+            
         
         
         
@@ -343,7 +368,13 @@ class Sync_Actor():
 
 
     def move(self,accelarate , press_brake):
+        # Assuming you have a 'self.vehicle' object that represents a spawned vehicle in CARLA
+        self.vehicle.set_autopilot(enabled=True)
         self.vehicle.apply_control(carla.VehicleControl(throttle=accelarate, brake=press_brake))
+
+    def ticker(self):
+        self.npc_manager.world.tick()
+        self.world.tick()
 
 
     def destroy_all_actors(self):

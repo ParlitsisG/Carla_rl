@@ -68,7 +68,7 @@ MIN_REWARD =-200
 DISCOUNT=0.99
 EPISODES =100
 e=1
-SECONDS_PER_EPISODE=15.0
+SECONDS_PER_EPISODE=35.0
 IM_WIDTH=160
 IM_HEIGHT=120
 e_decay=0.95
@@ -95,7 +95,7 @@ class ActionType(Enum):
 class CarEnv(gym.Env):
     def __init__(self):
         self.client = carla.Client("localhost", 2000)
-        self.client.set_timeout(80.0)  # duration for errors
+        self.client.set_timeout(30.0)  # duration for errors
         self.accelaration= 0
         self.brake= 0
         self.previous_accelaration=0
@@ -141,13 +141,14 @@ class CarEnv(gym.Env):
         self.brake= min(1.0,self.brake)
         self.accelaration=max(0.0,self.accelaration)
         self.accelaration=min(1.0,self.accelaration)
-        self.set_up_car.world.tick()
+        self.set_up_car.ticker()
         #self.set_up_car.move(self.accelaration,self.brake)
-        self.set_up_car.move(0.2,0.0)
+        self.set_up_car.move(0.3,0.0)
         velocity= self.set_up_car.vehicle.get_velocity()
         done= False
         reward=1
         kmh= int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
+        print (kmh)
         if (len(self.set_up_car.collision_hist) != 0):
             done =True
             reward = -1
@@ -167,6 +168,7 @@ class CarEnv(gym.Env):
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             print("time is up")
             done=True
+            print(f"Reward: {reward}, Done: {done}")
         return reward, done        
 
     
@@ -187,7 +189,6 @@ if __name__ == '__main__':
             action = 1
             reward, done = env.step(action)
             step_count += 1
-            print(f"Step: {step_count}, Reward: {reward}, Done: {done}")
         env.set_up_car.destroy_all_actors()
         #env.set_up_car.world.tick()
         
